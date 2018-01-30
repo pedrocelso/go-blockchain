@@ -3,10 +3,17 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
+	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
 )
 
 type Block struct {
@@ -15,6 +22,10 @@ type Block struct {
 	BPM       int
 	Hash      string
 	PrevHash  string
+}
+
+type Message struct {
+	BPM int
 }
 
 var BlockChain []Block
@@ -36,7 +47,7 @@ func (block *Block) isBlockValid(oldBlock Block) bool {
 		return false
 	}
 
-	if oldBlock.Hash != block.Hash {
+	if oldBlock.Hash != block.PrevHash {
 		return false
 	}
 
@@ -47,8 +58,11 @@ func (block *Block) isBlockValid(oldBlock Block) bool {
 	return true
 }
 
-func generateBlock(oldBlock Block, BPM int) (newBlock *Block, err error) {
+func generateBlock(oldBlock Block, BPM int) (*Block, error) {
+	var err error
 	t := time.Now()
+
+	newBlock := &Block{}
 
 	newBlock.Index = oldBlock.Index + 1
 	newBlock.Timestamp = t.String()
@@ -70,25 +84,89 @@ func replaceChain(newBlocks []Block) {
 	}
 }
 
-func main() {
-	fmt.Println("vim-go")
-
-	test := Block{
-		Index:     1,
-		Timestamp: "gerere",
-		BPM:       100,
-		Hash:      "",
-		PrevHash:  "",
+func run() error {
+	mux := makeMuxRouter()
+	httpAddr := os.Getenv("ADDR")
+	fmt.Println("Listening on ", os.Getenv("ADDR"))
+	s := &http.Server{
+		Addr:           ":" + httpAddr,
+		Handler:        mux,
+		ReadTimeout:    10 * time.Second,
+		WriteTimeout:   10 * time.Second,
+		MaxHeaderBytes: 1 << 20,
 	}
 
-	spew.Dump(test)
+	if err := s.ListenAndServe(); err != nil {
+		return err
+	}
 
-	var err error
-	test.Hash, err = test.generateHash()
+	return nil
+}
+
+func respondWithJSON(w http.ResponseWriter, r *http.Request, code int, payload interface{}) {
+	response, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("HTTP 500: Internal Server Error"))
+		return
+	}
+
+	w.WriteHeader(code)
+	w.Write(response)
+}
+
+func makeMuxRouter() http.Handler {
+	muxRouter := mux.NewRouter()
+	muxRouter.HandleFunc("/", handleGetBlockchain).Methods("GET")
+	muxRouter.HandleFunc("/", handleWriteBlock).Methods("POST")
+	return muxRouter
+}
+
+func handleGetBlockchain(w http.ResponseWriter, r *http.Request) {
+	bytes, err := json.MarshalIndent(BlockChain, "", "  ")
 
 	if err != nil {
-		panic(err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	io.WriteString(w, string(bytes))
+}
+
+func handleWriteBlock(w http.ResponseWriter, r *http.Request) {
+	var m Message
+
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&m); err != nil {
+		respondWithJSON(w, r, http.StatusBadRequest, r.Body)
+		return
 	}
 
-	spew.Dump(test)
+	defer r.Body.Close()
+	newBlock, err := generateBlock(BlockChain[len(BlockChain)-1], m.BPM)
+	if err != nil {
+		respondWithJSON(w, r, http.StatusInternalServerError, m)
+		return
+	}
+	if newBlock.isBlockValid(BlockChain[len(BlockChain)-1]) {
+		newBlockchain := append(BlockChain, *newBlock)
+		replaceChain(newBlockchain)
+	}
+
+	respondWithJSON(w, r, http.StatusCreated, newBlock)
+}
+
+func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	go func() {
+		t := time.Now()
+		firstBlock := Block{0, t.String(), 0, "", ""}
+		spew.Dump(firstBlock)
+		BlockChain = append(BlockChain, firstBlock)
+	}()
+
+	log.Fatal(run())
 }
